@@ -159,6 +159,11 @@ async function handleExplain(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/") && !env.ANTHROPIC_API_KEY)
+      return json(
+        { error: "Server isn't configured yet: run `npx wrangler secret put ANTHROPIC_API_KEY`." },
+        500
+      );
     try {
       if (request.method === "POST" && url.pathname === "/api/summarize")
         return await handleSummarize(request, env);

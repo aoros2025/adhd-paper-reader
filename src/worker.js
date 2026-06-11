@@ -29,6 +29,32 @@ Rules:
 
 When asked to explain a specific point from the article, explain it in 3-5 sentences like you're talking to someone smart but unfamiliar with academic writing. No jargon. No references to the study methodology unless necessary. Just what it means and why it's interesting.`;
 
+const REWRITE_SYSTEM_PROMPT = `You are an academic writing assistant. The user will give you rough notes, stream-of-consciousness thoughts, or bullet points. Your job is to rewrite them as a polished academic paragraph AND explain the key translation choices you made.
+
+Produce a JSON object with this structure:
+
+{
+  "paragraph": "The polished academic paragraph.",
+  "suggestions": ["Brief note about a specific translation choice and why it fits academic writing."]
+}
+
+Rules:
+- Preserve every idea the user included. Do not add new claims.
+- Use formal academic register but stay readable. No unnecessarily complex words.
+- Write in third person unless the input is clearly first-person reflection.
+- No hedging phrases like "it is important to note." Just make the point.
+- suggestions should have 3 to 5 items. Be specific -- reference the actual words changed.`;
+
+const REWRITE_SCHEMA = {
+  type: "object",
+  properties: {
+    paragraph: { type: "string" },
+    suggestions: { type: "array", items: { type: "string" } },
+  },
+  required: ["paragraph", "suggestions"],
+  additionalProperties: false,
+};
+
 // Gemini's responseSchema uses OpenAPI-style types.
 const GEMINI_SUMMARY_SCHEMA = {
   type: "OBJECT",
@@ -189,6 +215,34 @@ async function handleExplain(request, env) {
   return json({ explanation: text.trim() });
 }
 
+async function handleRewrite(request, env) {
+  const { notes } = await request.json();
+  if (!notes || !notes.trim())
+    return json({ error: "Missing 'notes' in request body." }, 400);
+  if (notes.length > 20000)
+    return json({ error: "That's a lot of notes — keep it under 20,000 characters (about a paragraph's worth of ideas at a time works best)." }, 413);
+
+  const client = new Anthropic({ apiKey: resolveKey(env, "ANTHROPIC_API_KEY") });
+  const response = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 4000,
+    system: REWRITE_SYSTEM_PROMPT,
+    output_config: {
+      effort: "medium",
+      format: { type: "json_schema", schema: REWRITE_SCHEMA },
+    },
+    messages: [
+      {
+        role: "user",
+        content: `Here are my rough notes. Rewrite them as a polished academic paragraph and explain your translation choices:\n\n${notes}`,
+      },
+    ],
+  });
+
+  const text = response.content.find((b) => b.type === "text")?.text ?? "{}";
+  return new Response(text, { headers: { "content-type": "application/json" } });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -197,7 +251,7 @@ export default {
         { error: "Server isn't configured yet: run `npx wrangler secret put GEMINI_API_KEY` (free key at aistudio.google.com/apikey)." },
         500
       );
-    if (url.pathname === "/api/explain" && !resolveKey(env, "ANTHROPIC_API_KEY"))
+    if ((url.pathname === "/api/explain" || url.pathname === "/api/rewrite") && !resolveKey(env, "ANTHROPIC_API_KEY"))
       return json(
         { error: "Server isn't configured yet: run `npx wrangler secret put ANTHROPIC_API_KEY`." },
         500
@@ -207,6 +261,8 @@ export default {
         return await handleSummarize(request, env);
       if (request.method === "POST" && url.pathname === "/api/explain")
         return await handleExplain(request, env);
+      if (request.method === "POST" && url.pathname === "/api/rewrite")
+        return await handleRewrite(request, env);
     } catch (err) {
       if (err instanceof Anthropic.AuthenticationError)
         return json({ error: "Server is missing a valid Anthropic API key." }, 500);

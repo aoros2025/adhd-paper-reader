@@ -26,7 +26,11 @@
   }
   main { max-width: 720px; margin: 0 auto; padding: 40px 20px 80px; }
   h1 { font-family: Georgia, serif; font-size: 2rem; margin: 0 0 4px; }
-  .tagline { color: var(--soft); margin: 0 0 32px; }
+  .tagline { color: var(--soft); margin: 0 0 16px; }
+  nav { margin-bottom: 32px; font-size: .9rem; }
+  nav a { color: var(--accent); text-decoration: none; margin-right: 16px; }
+  nav a.current { color: var(--ink); font-weight: 600; pointer-events: none; }
+  nav a:hover { text-decoration: underline; }
 
   #dropzone {
     border: 2px dashed var(--line);
@@ -114,6 +118,10 @@
 <main>
   <h1>Paper Brain</h1>
   <p class="tagline">Upload an academic article. Get the version your brain actually wants to read.</p>
+  <nav>
+    <a href="/" class="current">Read a paper</a>
+    <a href="/write">Notes → paragraph</a>
+  </nav>
 
   <div id="dropzone" tabindex="0" role="button" aria-label="Upload a PDF">
     <p class="big">Drop a PDF here, or click to choose one</p>

@@ -117,7 +117,7 @@
 
   <div id="dropzone" tabindex="0" role="button" aria-label="Upload a PDF">
     <p class="big">Drop a PDF here, or click to choose one</p>
-    <p class="hint">Research papers and journal articles work best · up to 32MB / ~100 pages</p>
+    <p class="hint">Research papers and journal articles work best · up to 15MB, long PDFs welcome</p>
   </div>
   <input type="file" id="file-input" accept="application/pdf" />
 
@@ -161,7 +161,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let pdfBase64 = null;
+let summaryData = null;
 
 const LOADING_MSGS = [
   "Reading the paper…",
@@ -227,7 +227,7 @@ async function explain(bullet, box) {
     const res = await fetch("/api/explain", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pdf: pdfBase64, bullet }),
+      body: JSON.stringify({ bullet, summary: summaryData }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Request failed");
@@ -241,6 +241,7 @@ async function explain(bullet, box) {
 }
 
 function render(data) {
+  summaryData = data;
   $("tldr").textContent = data.tldr;
   $("why").textContent = data.why_it_matters;
 
@@ -287,14 +288,14 @@ async function handleFile(file) {
     showError("That's not a PDF. Try a research paper or journal article saved as PDF.");
     return;
   }
-  if (file.size > 32 * 1024 * 1024) {
-    showError("This PDF is over 32MB. Try a smaller file or a single article instead of a whole issue.");
+  if (file.size > 15 * 1024 * 1024) {
+    showError("This PDF is over 15MB. Try a smaller file or a single article instead of a whole issue.");
     return;
   }
   $("error-box").style.display = "none";
   setLoading(true);
   try {
-    pdfBase64 = await fileToBase64(file);
+    const pdfBase64 = await fileToBase64(file);
     const res = await fetch("/api/summarize", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -329,7 +330,7 @@ $("file-input").addEventListener("change", (e) => handleFile(e.target.files[0]))
 dz.addEventListener("drop", (e) => handleFile(e.dataTransfer.files[0]));
 
 $("reset").addEventListener("click", () => {
-  pdfBase64 = null;
+  summaryData = null;
   $("results").style.display = "none";
   $("reset").style.display = "none";
   $("error-box").style.display = "none";

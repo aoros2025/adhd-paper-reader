@@ -1,6 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-const MODEL = "claude-sonnet-4-6";
+// Hybrid setup: Gemini Flash reads the PDF and produces the structured summary
+// (cheap per input token, free tier, handles very long documents); Claude
+// Sonnet writes the tap-to-explain answers from the summary context (small
+// requests where writing quality matters most).
+const GEMINI_MODEL = "gemini-2.5-flash";
+const CLAUDE_MODEL = "claude-sonnet-4-6";
 
 const SYSTEM_PROMPT = `You are a research assistant helping people with ADHD understand academic articles. Your job is to make dense research feel accessible and relevant -- not dumbed down, just human.
 
@@ -24,39 +29,38 @@ Rules:
 
 When asked to explain a specific point from the article, explain it in 3-5 sentences like you're talking to someone smart but unfamiliar with academic writing. No jargon. No references to the study methodology unless necessary. Just what it means and why it's interesting.`;
 
-const SUMMARY_SCHEMA = {
-  type: "object",
+// Gemini's responseSchema uses OpenAPI-style types.
+const GEMINI_SUMMARY_SCHEMA = {
+  type: "OBJECT",
   properties: {
     error: {
-      type: "string",
+      type: "STRING",
       description:
         "Empty string for a real academic article. Otherwise the not-an-article error message.",
     },
-    tldr: { type: "string" },
-    why_it_matters: { type: "string" },
-    key_takeaways: { type: "array", items: { type: "string" } },
+    tldr: { type: "STRING" },
+    why_it_matters: { type: "STRING" },
+    key_takeaways: { type: "ARRAY", items: { type: "STRING" } },
     sections: {
-      type: "array",
+      type: "ARRAY",
       items: {
-        type: "object",
+        type: "OBJECT",
         properties: {
-          title: { type: "string" },
-          takeaways: { type: "array", items: { type: "string" } },
+          title: { type: "STRING" },
+          takeaways: { type: "ARRAY", items: { type: "STRING" } },
         },
         required: ["title", "takeaways"],
-        additionalProperties: false,
       },
     },
     words_to_know: {
-      type: "array",
+      type: "ARRAY",
       items: {
-        type: "object",
+        type: "OBJECT",
         properties: {
-          term: { type: "string" },
-          definition: { type: "string" },
+          term: { type: "STRING" },
+          definition: { type: "STRING" },
         },
         required: ["term", "definition"],
-        additionalProperties: false,
       },
     },
   },
@@ -68,12 +72,20 @@ const SUMMARY_SCHEMA = {
     "sections",
     "words_to_know",
   ],
-  additionalProperties: false,
+  propertyOrdering: [
+    "error",
+    "tldr",
+    "why_it_matters",
+    "key_takeaways",
+    "sections",
+    "words_to_know",
+  ],
 };
 
-// 32MB is the Claude API's PDF limit; base64 inflates ~4/3, so cap the
-// decoded size client- and server-side.
-const MAX_PDF_BYTES = 32 * 1024 * 1024;
+// Gemini inline requests cap at 20MB total, so ~15MB of raw PDF after base64
+// inflation. Page count is rarely the limit — text-heavy PDFs run well past
+// 100 pages under 15MB.
+const MAX_PDF_BASE64_CHARS = 20 * 1024 * 1024;
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -82,29 +94,12 @@ function json(body, status = 200) {
   });
 }
 
-// Both endpoints send the identical system prompt and PDF block first, with a
-// cache breakpoint on the PDF — explain calls after a summarize hit the cache.
-function pdfMessageContent(pdfBase64, instruction) {
-  return [
-    {
-      type: "document",
-      source: {
-        type: "base64",
-        media_type: "application/pdf",
-        data: pdfBase64,
-      },
-      cache_control: { type: "ephemeral" },
-    },
-    { type: "text", text: instruction },
-  ];
-}
-
-// Tolerate whitespace in the secret name — dashboard-entered secrets can end
-// up as "ANTHROPIC_API_KEY " and silently never bind to the expected name.
-function resolveApiKey(env) {
-  if (env.ANTHROPIC_API_KEY) return env.ANTHROPIC_API_KEY;
+// Tolerate whitespace in secret names — dashboard-entered secrets can end up
+// as "ANTHROPIC_API_KEY " and silently never bind to the expected name.
+function resolveKey(env, name) {
+  if (env[name]) return env[name];
   for (const [k, v] of Object.entries(env)) {
-    if (typeof v === "string" && k.trim() === "ANTHROPIC_API_KEY") return v.trim();
+    if (typeof v === "string" && k.trim() === name) return v.trim();
   }
   return null;
 }
@@ -112,54 +107,80 @@ function resolveApiKey(env) {
 async function handleSummarize(request, env) {
   const { pdf } = await request.json();
   if (!pdf) return json({ error: "Missing 'pdf' (base64) in request body." }, 400);
-  if (pdf.length * 0.75 > MAX_PDF_BYTES)
-    return json({ error: "PDF is too large. The limit is 32MB (about 100 pages)." }, 413);
+  if (pdf.length > MAX_PDF_BASE64_CHARS)
+    return json({ error: "PDF is too large. The limit is 15MB." }, 413);
 
-  const client = new Anthropic({ apiKey: resolveApiKey(env) });
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 16000,
-    thinking: { type: "adaptive" },
-    system: SYSTEM_PROMPT,
-    output_config: {
-      effort: "medium",
-      format: { type: "json_schema", schema: SUMMARY_SCHEMA },
-    },
-    messages: [
-      {
-        role: "user",
-        content: pdfMessageContent(
-          pdf,
-          "Summarize this academic article using the JSON structure you were given."
-        ),
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": resolveKey(env, "GEMINI_API_KEY"),
       },
-    ],
-  });
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { inlineData: { mimeType: "application/pdf", data: pdf } },
+              {
+                text: "Summarize this academic article using the JSON structure you were given.",
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: GEMINI_SUMMARY_SCHEMA,
+        },
+      }),
+    }
+  );
 
-  const text = response.content.find((b) => b.type === "text")?.text ?? "{}";
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.error?.message ?? `HTTP ${res.status}`;
+    if (res.status === 429)
+      return json(
+        { error: "Hit the Gemini rate limit (free tier). Wait a minute and try again." },
+        429
+      );
+    if (res.status === 400 || res.status === 403)
+      return json({ error: `Gemini rejected the request: ${detail}` }, 400);
+    return json({ error: `Gemini error (${res.status}): ${detail}` }, 502);
+  }
+
+  const text = data.candidates?.[0]?.content?.parts
+    ?.map((p) => p.text ?? "")
+    .join("");
+  if (!text)
+    return json(
+      { error: "Gemini returned no summary. The PDF may be unreadable — try a different file." },
+      502
+    );
   return new Response(text, { headers: { "content-type": "application/json" } });
 }
 
 async function handleExplain(request, env) {
-  const { pdf, bullet } = await request.json();
-  if (!pdf || !bullet)
-    return json({ error: "Missing 'pdf' or 'bullet' in request body." }, 400);
-  if (pdf.length * 0.75 > MAX_PDF_BYTES)
-    return json({ error: "PDF is too large. The limit is 32MB (about 100 pages)." }, 413);
+  const { bullet, summary } = await request.json();
+  if (!bullet) return json({ error: "Missing 'bullet' in request body." }, 400);
 
-  const client = new Anthropic({ apiKey: resolveApiKey(env) });
+  const context = summary
+    ? `Here is the summary of the article the reader is looking at:\n\n${JSON.stringify(summary)}\n\n`
+    : "";
+
+  const client = new Anthropic({ apiKey: resolveKey(env, "ANTHROPIC_API_KEY") });
   const response = await client.messages.create({
-    model: MODEL,
+    model: CLAUDE_MODEL,
     max_tokens: 2000,
     output_config: { effort: "medium" },
     system: SYSTEM_PROMPT,
     messages: [
       {
         role: "user",
-        content: pdfMessageContent(
-          pdf,
-          `The reader wants a plain-language explanation of this specific point from the article:\n\n"${bullet}"\n\nExplain it in 3-5 sentences like you're talking to someone smart but unfamiliar with academic writing. No jargon. Respond with the explanation only.`
-        ),
+        content: `${context}The reader wants a plain-language explanation of this specific point from the article:\n\n"${bullet}"\n\nExplain it in 3-5 sentences like you're talking to someone smart but unfamiliar with academic writing. No jargon. Respond with the explanation only.`,
       },
     ],
   });
@@ -171,7 +192,12 @@ async function handleExplain(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/") && !resolveApiKey(env))
+    if (url.pathname === "/api/summarize" && !resolveKey(env, "GEMINI_API_KEY"))
+      return json(
+        { error: "Server isn't configured yet: run `npx wrangler secret put GEMINI_API_KEY` (free key at aistudio.google.com/apikey)." },
+        500
+      );
+    if (url.pathname === "/api/explain" && !resolveKey(env, "ANTHROPIC_API_KEY"))
       return json(
         { error: "Server isn't configured yet: run `npx wrangler secret put ANTHROPIC_API_KEY`." },
         500

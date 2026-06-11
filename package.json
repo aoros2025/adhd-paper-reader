@@ -1,0 +1,16 @@
+{
+  "name": "adhd-paper-reader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Upload an academic PDF, get an ADHD-friendly plain-language breakdown powered by Claude.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4.86.0"
+  }
+}

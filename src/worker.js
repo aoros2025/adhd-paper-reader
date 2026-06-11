@@ -20,7 +20,7 @@ Rules:
 - Each section's takeaways should have 2 to 4 items
 - words_to_know should only include terms that appear in your takeaways (global or section-level) and are not common knowledge
 - Do not use markdown inside the JSON values
-- If the PDF is not an academic article, set "error" to: "This doesn't look like an academic article. Try uploading a research paper or journal article." and leave the other fields as empty strings / empty arrays.
+- Set "error" to an empty string. EXCEPT: if the PDF is not an academic article, set "error" to: "This doesn't look like an academic article. Try uploading a research paper or journal article." and leave the other fields as empty strings / empty arrays.
 
 When asked to explain a specific point from the article, explain it in 3-5 sentences like you're talking to someone smart but unfamiliar with academic writing. No jargon. No references to the study methodology unless necessary. Just what it means and why it's interesting.`;
 
@@ -28,9 +28,9 @@ const SUMMARY_SCHEMA = {
   type: "object",
   properties: {
     error: {
-      type: ["string", "null"],
+      type: "string",
       description:
-        "Null for a real academic article. Otherwise the not-an-article error message.",
+        "Empty string for a real academic article. Otherwise the not-an-article error message.",
     },
     tldr: { type: "string" },
     why_it_matters: { type: "string" },
@@ -99,13 +99,23 @@ function pdfMessageContent(pdfBase64, instruction) {
   ];
 }
 
+// Tolerate whitespace in the secret name — dashboard-entered secrets can end
+// up as "ANTHROPIC_API_KEY " and silently never bind to the expected name.
+function resolveApiKey(env) {
+  if (env.ANTHROPIC_API_KEY) return env.ANTHROPIC_API_KEY;
+  for (const [k, v] of Object.entries(env)) {
+    if (typeof v === "string" && k.trim() === "ANTHROPIC_API_KEY") return v.trim();
+  }
+  return null;
+}
+
 async function handleSummarize(request, env) {
   const { pdf } = await request.json();
   if (!pdf) return json({ error: "Missing 'pdf' (base64) in request body." }, 400);
   if (pdf.length * 0.75 > MAX_PDF_BYTES)
     return json({ error: "PDF is too large. The limit is 32MB (about 100 pages)." }, 413);
 
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const client = new Anthropic({ apiKey: resolveApiKey(env) });
   const response = await client.messages.create({
     model: MODEL,
     max_tokens: 16000,
@@ -136,7 +146,7 @@ async function handleExplain(request, env) {
   if (pdf.length * 0.75 > MAX_PDF_BYTES)
     return json({ error: "PDF is too large. The limit is 32MB (about 100 pages)." }, 413);
 
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const client = new Anthropic({ apiKey: resolveApiKey(env) });
   const response = await client.messages.create({
     model: MODEL,
     max_tokens: 2000,
@@ -159,7 +169,7 @@ async function handleExplain(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/") && !env.ANTHROPIC_API_KEY)
+    if (url.pathname.startsWith("/api/") && !resolveApiKey(env))
       return json(
         { error: "Server isn't configured yet: run `npx wrangler secret put ANTHROPIC_API_KEY`." },
         500
@@ -174,10 +184,15 @@ export default {
         return json({ error: "Server is missing a valid Anthropic API key." }, 500);
       if (err instanceof Anthropic.RateLimitError)
         return json({ error: "Too many requests right now. Wait a minute and try again." }, 429);
-      if (err instanceof Anthropic.BadRequestError)
-        return json({ error: "Claude couldn't read this PDF. It may be corrupted, password-protected, or over 100 pages." }, 400);
-      if (err instanceof Anthropic.APIError)
-        return json({ error: `Upstream error (${err.status}). Try again shortly.` }, 502);
+      if (err instanceof Anthropic.BadRequestError) {
+        const detail = err.error?.error?.message ?? err.message;
+        return json({ error: `Claude rejected the request: ${detail}` }, 400);
+      }
+      if (err instanceof Anthropic.APIError) {
+        const detail = err.error?.error?.message ?? err.message;
+        return json({ error: `Upstream error (${err.status}): ${detail}` }, 502);
+      }
+      console.error(err);
       return json({ error: "Something went wrong. Try again." }, 500);
     }
     return env.ASSETS.fetch(request);

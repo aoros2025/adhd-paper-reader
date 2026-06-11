@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-const MODEL = "claude-opus-4-8";
+const MODEL = "claude-sonnet-4-6";
 
 const SYSTEM_PROMPT = `You are a research assistant helping people with ADHD understand academic articles. Your job is to make dense research feel accessible and relevant -- not dumbed down, just human.
 
@@ -122,6 +122,7 @@ async function handleSummarize(request, env) {
     thinking: { type: "adaptive" },
     system: SYSTEM_PROMPT,
     output_config: {
+      effort: "medium",
       format: { type: "json_schema", schema: SUMMARY_SCHEMA },
     },
     messages: [
@@ -150,6 +151,7 @@ async function handleExplain(request, env) {
   const response = await client.messages.create({
     model: MODEL,
     max_tokens: 2000,
+    output_config: { effort: "medium" },
     system: SYSTEM_PROMPT,
     messages: [
       {

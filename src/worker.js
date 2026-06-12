@@ -45,6 +45,82 @@ Rules:
 - No hedging phrases like "it is important to note." Just make the point.
 - suggestions should have 3 to 5 items. Be specific -- reference the actual words changed.`;
 
+const LAB_SYSTEM_PROMPT = `You are a lab operations assistant for the CREAR Lab (Community Research Exploring Adolescent Resilience) at the University of Pittsburgh. The user will paste either raw meeting notes or a transcript. Your job is to extract every action item, decision, and follow-up mentioned and organize them clearly.
+
+The lab uses a Color Team Rotation System with two hubs:
+
+Hub A -- Data and Research: Handles data management, IRB coordination, research protocols, internal systems, and study logistics. Co-led by Angel (Lab Manager, escalation point).
+
+Hub B -- Outreach and Engagement: Handles community outreach, recruitment, content, and social media. Led by Patrick. Note: grant writing is not part of this hub -- grants are handled by PI, grad students, and lab administration only.
+
+The user will specify an organization mode in their message: "by person", "by study", or "by hub".
+
+Produce a JSON object with this structure:
+
+{
+  "mode": "person" | "study" | "hub",
+  "groups": [
+    {
+      "label": "The person name, study name, or hub name",
+      "items": [
+        {
+          "action": "What needs to be done. One clear sentence.",
+          "deadline": "Mentioned deadline, or an empty string if none was stated",
+          "priority": "high | medium | low"
+        }
+      ]
+    }
+  ],
+  "decisions": [
+    "Any decisions that were made in this meeting, stated clearly."
+  ],
+  "unassigned": [
+    "Action items that were mentioned but not assigned to anyone, a study, or a hub."
+  ]
+}
+
+Rules:
+- Only extract what was actually said. Do not infer or add items.
+- If a deadline was mentioned, include it exactly as stated. Use an empty string when no deadline was stated.
+- Priority is your judgment based on language used (urgent, ASAP, before next meeting = high).
+- When organizing by hub, use the hub descriptions above to assign items correctly.
+- decisions and unassigned should be empty arrays if none apply.`;
+
+const LAB_SCHEMA = {
+  type: "object",
+  properties: {
+    mode: { type: "string", enum: ["person", "study", "hub"] },
+    groups: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          label: { type: "string" },
+          items: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                action: { type: "string" },
+                deadline: { type: "string" },
+                priority: { type: "string", enum: ["high", "medium", "low"] },
+              },
+              required: ["action", "deadline", "priority"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["label", "items"],
+        additionalProperties: false,
+      },
+    },
+    decisions: { type: "array", items: { type: "string" } },
+    unassigned: { type: "array", items: { type: "string" } },
+  },
+  required: ["mode", "groups", "decisions", "unassigned"],
+  additionalProperties: false,
+};
+
 const REWRITE_SCHEMA = {
   type: "object",
   properties: {
@@ -243,6 +319,36 @@ async function handleRewrite(request, env) {
   return new Response(text, { headers: { "content-type": "application/json" } });
 }
 
+async function handleActions(request, env) {
+  const { notes, mode } = await request.json();
+  if (!notes || !notes.trim())
+    return json({ error: "Missing 'notes' in request body." }, 400);
+  if (!["person", "study", "hub"].includes(mode))
+    return json({ error: "Mode must be 'person', 'study', or 'hub'." }, 400);
+  if (notes.length > 300000)
+    return json({ error: "That transcript is very long — keep it under 300,000 characters (split the meeting in two if needed)." }, 413);
+
+  const client = new Anthropic({ apiKey: resolveKey(env, "ANTHROPIC_API_KEY") });
+  const response = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 8000,
+    system: LAB_SYSTEM_PROMPT,
+    output_config: {
+      effort: "medium",
+      format: { type: "json_schema", schema: LAB_SCHEMA },
+    },
+    messages: [
+      {
+        role: "user",
+        content: `Organize by ${mode}.\n\nHere are the meeting notes:\n\n${notes}`,
+      },
+    ],
+  });
+
+  const text = response.content.find((b) => b.type === "text")?.text ?? "{}";
+  return new Response(text, { headers: { "content-type": "application/json" } });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -251,7 +357,7 @@ export default {
         { error: "Server isn't configured yet: run `npx wrangler secret put GEMINI_API_KEY` (free key at aistudio.google.com/apikey)." },
         500
       );
-    if ((url.pathname === "/api/explain" || url.pathname === "/api/rewrite") && !resolveKey(env, "ANTHROPIC_API_KEY"))
+    if (["/api/explain", "/api/rewrite", "/api/actions"].includes(url.pathname) && !resolveKey(env, "ANTHROPIC_API_KEY"))
       return json(
         { error: "Server isn't configured yet: run `npx wrangler secret put ANTHROPIC_API_KEY`." },
         500
@@ -263,6 +369,8 @@ export default {
         return await handleExplain(request, env);
       if (request.method === "POST" && url.pathname === "/api/rewrite")
         return await handleRewrite(request, env);
+      if (request.method === "POST" && url.pathname === "/api/actions")
+        return await handleActions(request, env);
     } catch (err) {
       if (err instanceof Anthropic.AuthenticationError)
         return json({ error: "Server is missing a valid Anthropic API key." }, 500);
